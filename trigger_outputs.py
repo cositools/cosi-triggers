@@ -62,9 +62,9 @@ def read_current_run(script_dir: str | None = None) -> str:
     return line
 
 
-_FLUX_OUTER_RE = re.compile(r'^flux-([\d.]+)-([\d.]+)([ab])$')
+_FLUX_OUTER_RE = re.compile(r'^flux-([\d.]+)-([\d.]+)([a-z])$')
 # Default (fast) mode: only these flux band replicas (keV edges), not e.g. flux-10-1000a.
-_FAST_FLUX_BAND_RE = re.compile(r'^flux-(?:1-10|10-100)[ab]$')
+_FAST_FLUX_BAND_RE = re.compile(r'^flux-(?:1-10|10-100)[a-z]$')
 
 
 def acs_outer_name_from_combined(combined_h5_path: str) -> str:
@@ -97,7 +97,7 @@ def find_events_csv(acs_root: str, outer_name: str) -> str | None:
 
 
 def is_fast_flux_dataset_name(name: str) -> bool:
-    """True for ``flux-1-10[ab]`` and ``flux-10-100[ab]`` only (not ``flux-10-1000*``)."""
+    """True for ``flux-1-10[a-z]`` and ``flux-10-100[a-z]`` only (not ``flux-10-1000*``)."""
     return bool(_FAST_FLUX_BAND_RE.match(name))
 
 

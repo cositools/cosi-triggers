@@ -237,12 +237,16 @@ def is_matched_row(mt: float, ma: float, ms: float) -> bool:
 
 def flux_pair_group_key(dataset_name: str) -> str:
     """
-    Map ``flux-1-10a`` / ``flux-1-10b`` → ``flux-1-10``; otherwise return name unchanged.
+    Map ``flux-1-10a`` … ``flux-1-10d`` → ``flux-1-10``; otherwise return name unchanged.
 
-    Only strips a single trailing ``a`` or ``b`` when preceded by a digit (band
+    Only strips a single trailing lowercase letter when preceded by a digit (band
     replicate convention).
     """
-    if len(dataset_name) >= 2 and dataset_name[-1] in 'ab' and dataset_name[-2].isdigit():
+    if (
+        len(dataset_name) >= 2
+        and 'a' <= dataset_name[-1] <= 'z'
+        and dataset_name[-2].isdigit()
+    ):
         return dataset_name[:-1]
     return dataset_name
 
@@ -689,13 +693,17 @@ def _load_detector_gp_counts(
     cache_dir: str,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray]]:
     """
-    Load relative bin-start times (s) and the gamma- and proton-channel binned
-    counts for each BGO detector from a binned cache directory. Times share the
-    relative timebase used for trigger / spurious times (first ACS bin start = 0 s).
+    Load bin-start times (s) and the gamma- and proton-channel binned counts for
+    each BGO detector from a binned cache directory. ``bin_times.npy`` is relative
+    to the first ACS bin; ``time_reference_s.npy`` is added back so the times share
+    the absolute (events.csv) timebase used for trigger / spurious times.
     """
     times = np.load(os.path.join(cache_dir, 'bin_times.npy'))
     times = np.asarray(times, dtype=np.float64)
     t_start = times[:, 0] if times.ndim == 2 else times
+    ref_path = os.path.join(cache_dir, 'time_reference_s.npy')
+    if os.path.isfile(ref_path):
+        t_start = t_start + float(np.load(ref_path))
     gamma: dict[str, np.ndarray] = {}
     proton: dict[str, np.ndarray] = {}
     for det in BGO_DETECTORS:
@@ -1004,7 +1012,7 @@ def plot_spurious_per_detector_lightcurves(
         fig, axes = plt.subplots(3, 2, figsize=(12, 10), sharex=True)
         fig.suptitle(
             f'Spurious trigger per-detector lightcurves + channel SNR ({label})\n'
-            f't = {t_trig:.3f} s (relative)  |  algorithm {alg}  |  merged σ = {sig:.2f}  '
+            f't = {t_trig:.3f} s  |  algorithm {alg}  |  merged σ = {sig:.2f}  '
             f'|  {bin_width_s:.3g} s bins ({ts_note})',
             fontsize=11,
         )
