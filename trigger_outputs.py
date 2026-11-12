@@ -9,11 +9,33 @@ latest run to process.
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import re
 from collections.abc import Sequence
 from datetime import datetime
 from typing import NamedTuple
+
+
+def read_table_rows(path: str) -> list[list[str]]:
+    """
+    Read a delimited table as a list of rows (header first).
+
+    The input catalogs (``events.csv``) and pre-2026-10 run outputs are
+    tab-separated despite the ``.csv`` name; current outputs are standard
+    comma-separated. The delimiter is chosen from the header line.
+    """
+    with open(path, newline='', encoding='utf-8') as f:
+        first = f.readline()
+        f.seek(0)
+        delim = '\t' if '\t' in first else ','
+        return list(csv.reader(f, delimiter=delim))
+
+
+def write_csv_rows(path: str, rows: Sequence[Sequence[object]]) -> None:
+    """Write a standard comma-separated file (fields with commas are quoted)."""
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        csv.writer(f, lineterminator='\n').writerows(rows)
 
 
 def _script_dir_here() -> str:
@@ -62,9 +84,9 @@ def read_current_run(script_dir: str | None = None) -> str:
     return line
 
 
-_FLUX_OUTER_RE = re.compile(r'^flux-([\d.]+)-([\d.]+)([ab])$')
+_FLUX_OUTER_RE = re.compile(r'^flux-([\d.]+)-([\d.]+)([a-z])$')
 # Default (fast) mode: only these flux band replicas (keV edges), not e.g. flux-10-1000a.
-_FAST_FLUX_BAND_RE = re.compile(r'^flux-(?:1-10|10-100)[ab]$')
+_FAST_FLUX_BAND_RE = re.compile(r'^flux-(?:1-10|10-100)[a-z]$')
 
 
 def acs_outer_name_from_combined(combined_h5_path: str) -> str:
@@ -96,8 +118,24 @@ def find_events_csv(acs_root: str, outer_name: str) -> str | None:
     return found[0]
 
 
+def find_binned_cache_dir(acs_root: str, dataset_name: str) -> str | None:
+    """
+    Directory holding the binned-count caches written by ``trigger_acs.py``
+    (``bin_times.npy``, ``time_reference_s.npy``, per-detector counts), next to
+    ``combined_acs_data.hdf5`` under ``acs_root/<dataset>/``. None if absent.
+    """
+    import glob
+
+    direct = os.path.join(acs_root, dataset_name, 'bin_times.npy')
+    if os.path.isfile(direct):
+        return os.path.dirname(direct)
+    # Legacy nested layout: acs_root/<dataset>/*/bin_times.npy
+    found = sorted(glob.glob(os.path.join(acs_root, dataset_name, '*', 'bin_times.npy')))
+    return os.path.dirname(found[0]) if found else None
+
+
 def is_fast_flux_dataset_name(name: str) -> bool:
-    """True for ``flux-1-10[ab]`` and ``flux-10-100[ab]`` only (not ``flux-10-1000*``)."""
+    """True for ``flux-1-10<r>`` and ``flux-10-100<r>`` replicas only (not ``flux-10-1000*``)."""
     return bool(_FAST_FLUX_BAND_RE.match(name))
 
 
@@ -106,7 +144,7 @@ def acs_datasets_for_mode(acs_root: str, *, complete: bool) -> list[str]:
     ACS dataset folder names (with ``events.csv``) for the current run scope.
 
     * ``complete=False`` (default / *fast* mode): only ``flux-1-10`` and ``flux-10-100``
-      ``a``/``b`` replicas.
+      replicas (``a``, ``b``, ...).
     * ``complete=True``: every dataset returned by ``expected_acs_dataset_names``.
     """
     all_n = expected_acs_dataset_names(acs_root)
@@ -190,7 +228,7 @@ def canonical_spurious_source_dataset_name(
     If ``dataset_names`` is set (e.g. fast-mode subset), only those names are
     considered; otherwise all expected ACS datasets are used.
 
-    Spurious merged triggers are identical across flux bands and ``a``/``b``;
+    Spurious merged triggers are identical across flux bands and replicate (``a``, ``b``, ...);
     ``trigger_match`` writes ``trigger-spurious.csv`` once from this folder and
     copies it to the others. Tie-break: lower high-edge after lower low-edge.
     Returns None if no matching ``*a`` name exists.

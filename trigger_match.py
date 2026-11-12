@@ -7,14 +7,14 @@ Cross-match merged triggers to events.csv by start time (within a time window).
 
 Merged triggers with no simulated event start within that window are **spurious**
 (no corresponding input event); they are listed in ``trigger-spurious.csv``.
-That list is **identical** for every flux band and ``a``/``b`` variant; it is
+That list is **identical** for every flux band and replicate (``a``, ``b``, ...) variant; it is
 computed once from the **lowest-flux ``a``** catalog folder (see
 ``trigger_outputs.canonical_spurious_source_dataset_name``) and copied to all
 other expected dataset folders after matching.
 
 Expected ACS flux folders (those with ``events.csv`` under the ACS root,
 default ``sgrbs-scaled-background-binned-acs``) define the suite. **Fast mode**
-(default) only includes ``flux-1-10`` and ``flux-10-100`` ``a``/``b`` replicas;
+(default) only includes ``flux-1-10`` and ``flux-10-100`` replicas (``a``, ``b``, ...);
 pass ``--complete`` to require every ACS flux band. Pass ``--acs-root`` to use
 a different ACS tree (for example the unscaled ``sgrbs-background-binned-acs-1-100``).
 Each dataset in scope must have ``triggers.npy`` in the
@@ -23,7 +23,6 @@ run before ``trigger_qa`` treats the run as complete for that scope.
 Run this file from the IDE or with optional ``--complete`` / ``--acs-root``.
 """
 
-import csv
 import math
 import os
 import shutil
@@ -112,9 +111,7 @@ def find_best_trigger_match(
 
 def load_finite_event_start_times(events_path: str, start_col: str) -> np.ndarray:
     """All finite event start times (s) from events.csv (one row per event line)."""
-    with open(events_path, newline='', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter='\t')
-        rows = list(reader)
+    rows = trigger_outputs.read_table_rows(events_path)
     if not rows:
         return np.array([], dtype=np.float64)
     header = rows[0]
@@ -130,6 +127,48 @@ def load_finite_event_start_times(events_path: str, start_col: str) -> np.ndarra
         except ValueError:
             continue
     return np.asarray(vals, dtype=np.float64)
+
+
+def catalog_time_offset(
+    acs_root: str,
+    dataset_name: str,
+    event_starts_s: np.ndarray,
+) -> tuple[float, float]:
+    """
+    Offset (s) to add to trigger times (relative to the first ACS bin) to put
+    them on the ``events.csv`` clock, and the fraction of events it covers.
+
+    Catalogs are either relative to the first ACS bin (offset 0) or on the
+    ACS file's absolute timebase (offset ``time_reference_s``). The candidate
+    placing the most event starts inside the ACS time span wins. Raises if no
+    candidate covers any event, so a clock mismatch cannot silently produce
+    zero detections.
+    """
+    ev = np.asarray(event_starts_s, dtype=np.float64)
+    ev = ev[np.isfinite(ev)]
+    cache = trigger_outputs.find_binned_cache_dir(acs_root, dataset_name)
+    if cache is None or ev.size == 0:
+        return 0.0, float('nan')
+    times = np.load(os.path.join(cache, 'bin_times.npy'))
+    t_start = times[:, 0] if times.ndim == 2 else times
+    t_end = times[:, 1] if times.ndim == 2 else times
+    lo, hi = float(np.min(t_start)), float(np.max(t_end))
+    ref_path = os.path.join(cache, 'time_reference_s.npy')
+    ref = float(np.load(ref_path)) if os.path.isfile(ref_path) else 0.0
+
+    best_off, best_frac = 0.0, -1.0
+    for off in dict.fromkeys((0.0, ref)):
+        frac = float(np.mean((ev >= lo + off) & (ev <= hi + off)))
+        if frac > best_frac:
+            best_off, best_frac = off, frac
+    if best_frac <= 0.0:
+        raise ValueError(
+            f'[{dataset_name}] No event start time ({ev.min():.6g}–{ev.max():.6g} s) lies '
+            f'inside the ACS data span, either relative ({lo:.6g}–{hi:.6g} s) or shifted '
+            f'by time_reference_s = {ref:.10g} s. events.csv and combined_acs_data.hdf5 '
+            'are on different clocks; matching would report zero detections.'
+        )
+    return best_off, best_frac
 
 
 def spurious_merged_triggers(
@@ -160,11 +199,8 @@ def spurious_merged_triggers(
 
 def write_spurious_csv(path: str, spurious: np.ndarray) -> None:
     header = ['Trigger time (s)', 'Algorithm', 'Significance']
-    with open(path, 'w', newline='', encoding='utf-8') as f:
-        w = csv.writer(f, delimiter='\t', lineterminator='\n')
-        w.writerow(header)
-        for row in spurious:
-            w.writerow([str(row[0]), str(row[1]), str(row[2])])
+    rows = [header] + [[str(row[0]), str(row[1]), str(row[2])] for row in spurious]
+    trigger_outputs.write_csv_rows(path, rows)
 
 
 def crossmatch_events_csv(
@@ -174,10 +210,8 @@ def crossmatch_events_csv(
     window_s: float,
     start_col: str = START_TIME_COL,
 ) -> None:
-    """Read events CSV (tab-delimited), append three match columns, write out_path."""
-    with open(events_path, newline='', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter='\t')
-        rows = list(reader)
+    """Read the events catalog, append the match columns, write out_path as CSV."""
+    rows = trigger_outputs.read_table_rows(events_path)
 
     if not rows:
         raise ValueError(f'Empty file: {events_path}')
@@ -190,10 +224,14 @@ def crossmatch_events_csv(
             f'Column {start_col!r} not found in {events_path}; header={header!r}'
         ) from e
 
+    # Every catalog event is written. Undetected events carry ``nan`` in the
+    # three matched columns (algorithm 0 is a real test, so 0 cannot mean
+    # "no match") and ``Detected`` = 0.
     out_header = header + [
         'Matched trigger time (s)',
         'Matched trigger algorithm',
         'Matched trigger significance',
+        'Detected',
     ]
     out_rows = [out_header]
 
@@ -209,15 +247,13 @@ def crossmatch_events_csv(
 
         mt, ma, ms = find_best_trigger_match(t_event, merged, window_s)
         if mt == 0.0 and ma == 0.0 and ms == 0.0:
-            suffix = ['0', '0', '0']
+            suffix = ['nan', 'nan', 'nan', '0']
         else:
-            suffix = [str(mt), str(ma), str(ms)]
+            suffix = [str(mt), str(ma), str(ms), '1']
 
         out_rows.append(row[: len(header)] + suffix)
 
-    with open(out_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f, delimiter='\t', lineterminator='\n')
-        writer.writerows(out_rows)
+    trigger_outputs.write_csv_rows(out_path, out_rows)
 
 
 # --- Run in IDE: execute this file (entire file or from here downward) ---
@@ -335,17 +371,34 @@ def main():
             continue
 
         event_starts = load_finite_event_start_times(events_path, START_TIME_COL)
+        offset, covered = catalog_time_offset(ACS_ROOT, name, event_starts)
+        if np.isfinite(covered):
+            print(
+                f'[{name}] events.csv clock = ACS relative time + {offset:.10g} s '
+                f'({covered:.0%} of event starts inside the ACS data span)'
+            )
+            if covered < 1.0:
+                print(f'[{name}] Warning: {1.0 - covered:.0%} of events fall outside the ACS data.')
+        # trigger-merged.npy and trigger-spurious.csv stay on the ACS relative clock
+        # (QA lightcurves index bin_times.npy); matched times use the catalog clock.
+        merged_catalog = merged.copy()
+        if merged_catalog.size:
+            merged_catalog[:, 0] += offset
         if spur_canon is not None and name != spur_canon:
             print(f'[{name}] Spurious list will be copied from {spur_canon!r} (after pass).')
         else:
-            spurious = spurious_merged_triggers(merged, event_starts, CROSSMATCH_WINDOW_S)
+            spurious = spurious_merged_triggers(
+                merged, event_starts - offset, CROSSMATCH_WINDOW_S
+            )
             write_spurious_csv(path_spurious_csv, spurious)
             print(
                 f'[{name}] Spurious merged triggers: {len(spurious)} / {len(merged)} '
                 f'→ {path_spurious_csv}'
             )
 
-        crossmatch_events_csv(events_path, merged, path_events_matched, CROSSMATCH_WINDOW_S)
+        crossmatch_events_csv(
+            events_path, merged_catalog, path_events_matched, CROSSMATCH_WINDOW_S
+        )
         print(
             f'[{name}] Cross-matched (|Δt| ≤ {CROSSMATCH_WINDOW_S} s) '
             f'{events_path} → {path_events_matched}'

@@ -101,7 +101,10 @@ for fast mode, well over an hour for `--complete`, depending on the machine).
 2. **`trigger_match.py`** — merges trigger rows within 5 s into single
    triggers keeping the most significant (`trigger-merged.npy`), attaches the
    nearest merged trigger within 5 s of each injected start to the catalog
-   (`events-matched.csv`; unmatched events get `0.0` in the matched columns),
+   (`events-matched.csv`: standard comma-separated CSV with every catalog event
+   and a final `Detected` column of 1/0; undetected events have `nan` in the
+   three matched-trigger columns. Input `events.csv` files may be tab-separated;
+   the readers accept either),
    and lists merged triggers with no injected burst within 5 s as
    **spurious** (`trigger-spurious.csv`). Because the background is identical
    across datasets, the spurious list is computed once from the lowest-flux `a`

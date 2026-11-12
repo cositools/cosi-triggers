@@ -19,7 +19,7 @@ gamma/proton σ). All per-channel SNRs are also saved to
 
 Dataset names like ``flux-10-100a`` and ``flux-10-100b`` are treated as one
 *flux group* (base ``flux-10-100``): per-folder QA still runs separately, but
-additional *population* flux-summary figures merge all ``a``/``b`` members
+additional *population* flux-summary figures merge all replicate (``a``, ``b``, ...) members
 into one pair of PNGs under the run directory.
 
 After all datasets, writes global figures under that run: recovery efficiency
@@ -36,7 +36,7 @@ For **50–300 keV** global recovery and merged population summaries, the refere
 curve from ``gbm_64ms.txt`` (flux vs recovery) is drawn and labeled
 ``Fermi-GBM 64 ms``.
 
-Supplementary tab-separated CSVs next to each ``events.csv`` under
+Supplementary CSVs (tab- or comma-separated) next to each ``events.csv`` under
 ``sgrbs-scaled-background-binned-acs/<dataset>/`` (named like ``flux-10-100a.csv``)
 provide peak photon flux for **10–1000 keV** and **50–300 keV**; those columns
 are joined by ``Event`` id to each row of ``events-matched.csv`` for the
@@ -45,7 +45,7 @@ corresponding brightness-summary figures.
 If ACS defines a flux suite (``trigger_outputs.expected_acs_dataset_names``),
 **no** QA runs until **every dataset in the current scope** has a folder under the
 run with ``events-matched.csv``. **Fast mode** (default) scopes QA to ``flux-1-10``
-and ``flux-10-100`` ``a``/``b`` only; pass ``--complete`` on the command line to
+and ``flux-10-100`` replicate (``a``, ``b``, ...) only; pass ``--complete`` on the command line to
 require the full ACS flux suite. Pass ``--acs-root`` to use a different ACS tree.
 With no ACS catalog, the same completeness rule
 applies to every subfolder of the run directory.
@@ -56,7 +56,6 @@ Time offsets in this script use trigger time minus (Start time + Peak start time
 per row — not the cross-match reference used in trigger_match.py.
 """
 
-import csv
 import os
 import re
 from collections import defaultdict
@@ -196,6 +195,7 @@ COL_PEAK_START = 'Peak start time (s)'
 COL_MT = 'Matched trigger time (s)'
 COL_MA = 'Matched trigger algorithm'
 COL_MS = 'Matched trigger significance'
+COL_DETECTED = 'Detected'
 # Closest available to “10–1000 keV” brightness in the catalog:
 COL_FLUX_10_10000 = 'Peak photon flux (ph/cm^2/s) for 10-10000 keV'
 COL_FLUX_80_2000 = 'Peak photon flux (ph/cm^2/s) for 80-2000 keV'
@@ -206,9 +206,7 @@ COL_FLUX_SUPP_50_300 = 'Peak photon flux (ph/cm^2/s) for 50-300 keV'
 
 
 def load_events_matched_tsv(path: str) -> tuple[list[str], dict[str, list[str]]]:
-    with open(path, newline='', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter='\t')
-        rows = list(reader)
+    rows = trigger_outputs.read_table_rows(path)
     if not rows:
         raise ValueError(f'Empty file: {path}')
     header = rows[0]
@@ -232,17 +230,20 @@ def col_float(data: dict[str, list[str]], key: str) -> np.ndarray:
 
 
 def is_matched_row(mt: float, ma: float, ms: float) -> bool:
+    """Legacy files (no ``Detected`` column) mark undetected events with 0, 0, 0."""
+    if not (np.isfinite(mt) and np.isfinite(ms)):
+        return False
     return not (mt == 0.0 and ma == 0.0 and ms == 0.0)
 
 
 def flux_pair_group_key(dataset_name: str) -> str:
     """
-    Map ``flux-1-10a`` / ``flux-1-10b`` → ``flux-1-10``; otherwise return name unchanged.
+    Map ``flux-1-10a`` / ``flux-1-10b`` / ... → ``flux-1-10``; otherwise return name unchanged.
 
-    Only strips a single trailing ``a`` or ``b`` when preceded by a digit (band
+    Only strips a single trailing lowercase letter when preceded by a digit (band
     replicate convention).
     """
-    if len(dataset_name) >= 2 and dataset_name[-1] in 'ab' and dataset_name[-2].isdigit():
+    if len(dataset_name) >= 2 and dataset_name[-1].islower() and dataset_name[-2].isdigit():
         return dataset_name[:-1]
     return dataset_name
 
@@ -668,21 +669,7 @@ def plot_spurious_nearest_trigger_offset_figure(
 
 
 def _find_binned_cache_dir(acs_root: str, dataset_name: str) -> str | None:
-    """
-    Directory holding the per-detector binned-count caches written by
-    ``trigger_acs.py`` (``bgo_<det>_binned_counts_gamma_channel.npy`` and
-    ``bin_times.npy``) — i.e. the folder next to ``combined_acs_data.hdf5`` under
-    ``acs_root/<dataset>/``. Returns None if the cache is not present.
-    """
-    import glob
-
-    direct = os.path.join(acs_root, dataset_name, 'bin_times.npy')
-    if os.path.isfile(direct):
-        return os.path.dirname(direct)
-    # Legacy nested layout: acs_root/<dataset>/*/bin_times.npy
-    pattern = os.path.join(acs_root, dataset_name, '*', 'bin_times.npy')
-    found = sorted(glob.glob(pattern))
-    return os.path.dirname(found[0]) if found else None
+    return trigger_outputs.find_binned_cache_dir(acs_root, dataset_name)
 
 
 def _load_detector_gp_counts(
@@ -829,7 +816,7 @@ def _write_spurious_channel_snr_csv(
     path: str, label: str, records: list[dict[str, object]]
 ) -> None:
     """
-    Tab-separated table of every spurious trigger's per-channel SNRs (all 12
+    Comma-separated table of every spurious trigger's per-channel SNRs (all 12
     channels) plus the algorithm-tuning derived quantities. ``-999``/non-finite
     σ are written blank.
     """
@@ -847,27 +834,26 @@ def _write_spurious_channel_snr_csv(
             return ''
         return f'{f:.6g}' if np.isfinite(f) and f > -900.0 else ''
 
-    with open(path, 'w', newline='', encoding='utf-8') as fh:
-        w = csv.writer(fh, delimiter='\t', lineterminator='\n')
-        w.writerow(header)
-        for rec in records:
-            snr = rec['snr']  # type: ignore[index]
-            sigmas = np.asarray(snr['sigmas'], dtype=np.float64)  # type: ignore[index]
-            if snr.get('algo') is None:  # type: ignore[union-attr]
-                row = [
-                    label, _num(rec['t_trig']), str(rec['alg']), _num(rec['sig']),
-                    _num(rec['timescale_s']), '', '', '', '', '',
-                ] + ['' for _ in real_chans]
-            else:
-                row = [
-                    label, _num(rec['t_trig']), str(rec['alg']), _num(rec['sig']),
-                    _num(rec['timescale_s']),
-                    str(snr['n_chan_over_thresh']), str(snr['n_over']),  # type: ignore[index]
-                    _num(snr['marginal_snr']),  # type: ignore[index]
-                    _num(snr['lowest_trig_gamma']),  # type: ignore[index]
-                    _num(snr['lowest_trig_proton']),  # type: ignore[index]
-                ] + [_num(sigmas[c]) for c in real_chans]
-            w.writerow(row)
+    out_rows: list[list[str]] = [header]
+    for rec in records:
+        snr = rec['snr']  # type: ignore[index]
+        sigmas = np.asarray(snr['sigmas'], dtype=np.float64)  # type: ignore[index]
+        if snr.get('algo') is None:  # type: ignore[union-attr]
+            row = [
+                label, _num(rec['t_trig']), str(rec['alg']), _num(rec['sig']),
+                _num(rec['timescale_s']), '', '', '', '', '',
+            ] + ['' for _ in real_chans]
+        else:
+            row = [
+                label, _num(rec['t_trig']), str(rec['alg']), _num(rec['sig']),
+                _num(rec['timescale_s']),
+                str(snr['n_chan_over_thresh']), str(snr['n_over']),  # type: ignore[index]
+                _num(snr['marginal_snr']),  # type: ignore[index]
+                _num(snr['lowest_trig_gamma']),  # type: ignore[index]
+                _num(snr['lowest_trig_proton']),  # type: ignore[index]
+            ] + [_num(sigmas[c]) for c in real_chans]
+        out_rows.append(row)
+    trigger_outputs.write_csv_rows(path, out_rows)
 
 
 def plot_spurious_per_detector_lightcurves(
@@ -1073,8 +1059,7 @@ def plot_spurious_per_detector_lightcurves(
 def load_spurious_array(path: str) -> np.ndarray:
     if not os.path.isfile(path):
         return np.empty((0, 3), dtype=np.float64)
-    with open(path, newline='', encoding='utf-8') as f:
-        rows = list(csv.reader(f, delimiter='\t'))
+    rows = trigger_outputs.read_table_rows(path)
     if len(rows) < 2:
         return np.empty((0, 3), dtype=np.float64)
     out = []
@@ -1116,7 +1101,7 @@ def summarize_spurious_canonical_run(
 ) -> None:
     """
     One-run summary using **only** the lowest-flux ``a`` catalog (same spurious list
-    as all flux / ``a``/``b`` copies): nearest injected-event **start** time offset
+    as all flux / replicate (``a``, ``b``, ...) copies): nearest injected-event **start** time offset
     per spurious row, global minimum offset, and SNR (σ) distribution including
     breakdown by firing algorithm index.
 
@@ -1453,9 +1438,12 @@ def catalog_vectors_from_tsv_data(
     n = len(t_trig)
     if n == 0:
         raise ValueError('No data rows in events-matched.csv')
-    matched = np.array(
-        [is_matched_row(t_trig[i], alg[i], sig[i]) for i in range(n)], dtype=bool
-    )
+    if COL_DETECTED in data:
+        matched = col_float(data, COL_DETECTED) == 1.0
+    else:
+        matched = np.array(
+            [is_matched_row(t_trig[i], alg[i], sig[i]) for i in range(n)], dtype=bool
+        )
     return flux_10_10000, flux_80, matched, sig, flux_energy, n
 
 
@@ -1485,9 +1473,7 @@ def load_supplementary_flux_table(path: str) -> dict[str, tuple[float, float]]:
     Map Event -> (10–1000 keV photon flux, 50–300 keV photon flux).
     Missing numeric entries become NaN.
     """
-    with open(path, newline='', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter='\t')
-        rows = list(reader)
+    rows = trigger_outputs.read_table_rows(path)
     if len(rows) < 2:
         return {}
     header = [h.strip() for h in rows[0]]
@@ -1529,14 +1515,28 @@ def supplementary_flux_vectors(
     data: dict[str, list[str]],
     path_supp: str | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-row arrays aligned to ``data`` (same order as ``events-matched``)."""
+    """Per-row arrays aligned to ``data`` (same order as ``events-matched``).
+
+    Newer datasets carry the 10–1000 and 50–300 keV fluxes as ``events.csv``
+    columns (and therefore in ``events-matched``) instead of a companion CSV;
+    those columns are used when no companion file exists.
+    """
     if COL_EVENT not in data:
         raise KeyError(f'Missing {COL_EVENT!r} in events-matched data')
     n = len(data[COL_EVENT])
     nan2 = (np.nan, np.nan)
     if not path_supp or not os.path.isfile(path_supp):
-        empty = np.full(n, np.nan, dtype=np.float64)
-        return empty.copy(), empty.copy()
+        def _col(name: str) -> np.ndarray:
+            if name not in data:
+                return np.full(n, np.nan, dtype=np.float64)
+            out = np.full(n, np.nan, dtype=np.float64)
+            for i, s in enumerate(data[name]):
+                try:
+                    out[i] = float(s)
+                except ValueError:
+                    pass
+            return out
+        return _col(COL_FLUX_SUPP_10_1000), _col(COL_FLUX_SUPP_50_300)
 
     table = load_supplementary_flux_table(path_supp)
     f1k = np.empty(n, dtype=np.float64)
@@ -2053,7 +2053,7 @@ def plot_merged_group_population_summaries(
     member_labels: list[str],
     paths_matched: list[str],
 ) -> None:
-    """Merge ``a``/``b`` (or more) catalogs and write flux-summary PNGs under run_dir."""
+    """Merge replicate (``a``, ``b``, ...) catalogs and write flux-summary PNGs under run_dir."""
     flux_w = []
     flux_8 = []
     flux_1k = []

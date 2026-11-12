@@ -87,11 +87,13 @@ def load_combined_acs_bgo_counts_gamma_proton(combined_path, split_kev=2000.0):
     bin into gamma-channel (< split_kev keV) and proton-channel (>= split_kev)
     sums over energy bins (linear apportionment when a bin straddles split_kev).
 
-    Datasets are x0,x1,y0,y1,z0,z1 with shape (n_time_bins, n_energy_bins).
-    Energy bin edges are in 'energy bins (keV)' (typically 80, 2000, inf).
+    Panel datasets have shape (n_time_bins, n_energy_bins) and are named either
+    ACS-A-Z0/Z1, ACS-C-X0/X1, ACS-B-Y0/Y1 (current deliveries) or
+    z0,z1,x0,x1,y0,y1 (earlier ones). Energy bin edges are in
+    'energy bins (keV)' (typically 80, 2000, inf).
 
     Maps ACS names to the legacy BGO order: b1,b2,x1,x2,y1,y2
-    (z0,z1 → b1,b2; x0,x1 → x1,x2; y0,y1 → y1,y2).
+    (Z0,Z1 → b1,b2; X0,X1 → x1,x2; Y0,Y1 → y1,y2).
 
     Trigger logic uses gamma-channel rates only; proton channels are written to
     disk for downstream analysis.
@@ -103,16 +105,21 @@ def load_combined_acs_bgo_counts_gamma_proton(combined_path, split_kev=2000.0):
         n_time = len(time_edges) - 1
         w_g, w_p = _gamma_proton_energy_bin_weights(energy_edges, split_kev)
         mapping = (
-            ('z0', 'b1'),
-            ('z1', 'b2'),
-            ('x0', 'x1'),
-            ('x1', 'x2'),
-            ('y0', 'y1'),
-            ('y1', 'y2'),
+            (('ACS-A-Z0', 'z0'), 'b1'),
+            (('ACS-A-Z1', 'z1'), 'b2'),
+            (('ACS-C-X0', 'x0'), 'x1'),
+            (('ACS-C-X1', 'x1'), 'x2'),
+            (('ACS-B-Y0', 'y0'), 'y1'),
+            (('ACS-B-Y1', 'y1'), 'y2'),
         )
         counts_gamma = {}
         counts_proton = {}
-        for acs_name, legacy in mapping:
+        for names, legacy in mapping:
+            acs_name = next((n for n in names if n in hf), None)
+            if acs_name is None:
+                raise KeyError(
+                    f'{combined_path}: none of {names} found; datasets = {sorted(hf.keys())}'
+                )
             block = np.asarray(hf[acs_name], dtype=np.float64)
             if block.shape != (n_time, n_e):
                 raise ValueError(
@@ -550,7 +557,7 @@ def main():
     )
     shutil.copy2(os.path.join(_SCRIPT_DIR, 'data.ini'), os.path.join(run_dir, 'data.ini'))
     mode_note = (
-        'Default trigger_acs scope is **fast**: only flux-1-10 and flux-10-100 ``a``/``b`` '
+        'Default trigger_acs scope is **fast**: only flux-1-10 and flux-10-100 replicate (``a``, ``b``, ...) '
         'folders (pass ``--complete`` on the command line for every ACS flux band).\n'
     )
     with open(os.path.join(run_dir, 'README.txt'), 'w', encoding='utf-8') as rf:
